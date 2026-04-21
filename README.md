@@ -1,7 +1,6 @@
-# SCIM Server DB
+# SCIM Sandbox - Server DB
 
-This repository is the standalone database migration bundle for the SCIM Sandbox server database. It was split out of a larger SCIM Sandbox repository so the schema can be versioned, reviewed, and deployed independently.
-
+This repository is the standalone database migration bundle for the SCIM Sandbox server database.
 ## What Is In This Repo
 
 - `sql/` contains the Flyway migration scripts.
