@@ -31,11 +31,11 @@ When you build or run the bundle, supply the Flyway connection settings at runti
 
 ## Versioning
 
-The release version is stored in [`VERSION`](./VERSION). The GitHub release workflow bumps that file with a patch, minor, or major increment, then tags and publishes the resulting commit. Pushing that release tag triggers the Docker publish workflow, which builds and pushes `edipal/scim-flyway-api`.
+The release version is stored in [`VERSION`](./VERSION). The GitHub release workflow bumps that file with a patch, minor, or major increment, then tags and publishes the resulting commit. Publishing that GitHub release triggers the Docker publish workflow, which builds and pushes `edipal/scim-flyway-api`.
 
 ## Published Image
 
-Released tags publish a multi-arch Flyway image to `edipal/scim-flyway-api` with `latest`, `vX.Y.Z`, `X.Y.Z`, and `X.Y` tags.
+Published releases build and push a multi-arch Flyway image to `edipal/scim-flyway-api` with `latest`, `vX.Y.Z`, `X.Y.Z`, and `X.Y` tags.
 
 ## Validation
 
