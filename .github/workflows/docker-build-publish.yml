@@ -9,7 +9,7 @@ permissions: {}
 
 jobs:
   docker-build-publish:
-    name: Build and push scim-flyway-api
+    name: Build and push scim-server-db
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -36,7 +36,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@030e881283bb7a6894de51c315a6bfe6a94e05cf # v6.0.0
         with:
-          images: edipal/scim-flyway-api
+          images: edipal/scim-server-db
           tags: |
             type=raw,value=latest,enable=true
             type=raw,value=${{ github.event.release.tag_name }}
