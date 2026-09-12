@@ -1,0 +1,30 @@
+-- RFC 7643 §7 defines User.userName with "caseExact": false, so "Alice@example.com" and
+-- "alice@example.com" are the same identity. The original constraint
+-- uk_scim_users_workspace_user_name is case-sensitive, which left the application's
+-- LOWER(user_name) pre-check as the only enforcement of that rule. A check issued as a
+-- separate statement from the write cannot survive concurrent requests: two requests can
+-- both pass the check before either writes, and the case-sensitive constraint does not
+-- catch the pair that differ only in case. This index makes the database enforce the rule
+-- the API advertises, so the application check becomes a fast path for a friendly error
+-- rather than the sole guard.
+--
+-- If this migration fails with a duplicate key error, the data already contains
+-- case-variant userNames produced by that race. Locate them with:
+--
+--   SELECT workspace_id, LOWER(user_name), COUNT(*)
+--     FROM scim_users
+--    GROUP BY workspace_id, LOWER(user_name)
+--   HAVING COUNT(*) > 1;
+--
+-- and reconcile them before re-running. This is deliberately not auto-resolved: deciding
+-- which duplicate survives is a data decision, not a migration's.
+--
+-- Built inside Flyway's transaction, which is appropriate here because migrations run in a
+-- dedicated init container before the API serves traffic, so the brief write lock costs
+-- nothing. To build this against a live cluster instead, use CREATE UNIQUE INDEX
+-- CONCURRENTLY together with "-- flyway:executeInTransaction=false".
+--
+-- uk_scim_users_workspace_user_name is now redundant (every pair it rejects is also
+-- rejected here) but is left in place; removing it is a separate decision.
+CREATE UNIQUE INDEX IF NOT EXISTS uk_scim_users_workspace_user_name_ci
+    ON scim_users (workspace_id, LOWER(user_name));
