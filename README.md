@@ -10,17 +10,23 @@ This repository is the standalone database migration bundle for the SCIM Sandbox
 
 ## Schema Overview
 
-The initial migration creates:
-
-- `workspaces` for tenant and workspace metadata.
-- `mgmt_users` for management users.
-- `scim_users` for SCIM user records and profile attributes.
-- `scim_groups` for SCIM groups.
-- `scim_group_memberships` for group membership links.
-- `workspace_tokens` for workspace-scoped API tokens.
-- `scim_request_logs` for request and response auditing.
-
-The migration also adds unique constraints and indexes for workspace lookup, external IDs, membership lookups, token lookup, and request-log ordering.
+- **`V1` (Initial schema)**:
+  - `workspaces` for tenant and workspace metadata.
+  - `mgmt_users` for management users.
+  - `scim_users` for SCIM user records and profile attributes.
+  - `scim_groups` for SCIM groups.
+  - `scim_group_memberships` for group membership links.
+  - `workspace_tokens` for workspace-scoped API tokens.
+  - `scim_request_logs` for request and response auditing.
+- **`V2` (Request path enlargement)**:
+  - Alters `scim_request_logs.request_path` to `TEXT` to accommodate extended query parameters and long request URIs.
+- **`V3` (Case-insensitive unique username)**:
+  - Adds unique index `uk_scim_users_workspace_user_name_ci` on `(workspace_id, LOWER(user_name))` per RFC 7643 §7.
+- **`V4` (Asynchronous events & SET polling)**:
+  - Creates `scim_async_events` table for RFC 9967 asynchronous operation tracking.
+  - Enforces uppercase HTTP methods (`POST`, `PUT`, `PATCH`, `DELETE`) via `chk_scim_async_events_operation`.
+  - Enforces strict lifecycle state invariants via `chk_scim_async_events_lifecycle` (`PENDING` requires null `completed_at` and null `set_payload`; `COMPLETED` and `FAILED` require non-null values for both).
+  - Configures indexes for per-workspace reverse-chronological ordering (`idx_scim_async_events_workspace_created_at`) and partial index on active operations for the stale-`PENDING` reaper (`idx_scim_async_events_pending_created_at`).
 
 ## Working With Migrations
 
