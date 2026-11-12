@@ -1,0 +1,47 @@
+# Version control & CI
+.git
+.github
+
+# Repository docs, scripts, metadata & release outputs
+dist
+scripts
+*.md
+LICENSE
+VERSION
+.allowed_signers
+.editorconfig
+.gitattributes
+
+# Test, coverage, logs & security scan artifacts
+.scannerwork
+*.log
+logs
+*.tmp
+temp
+.trivyignore
+trivy-*.sarif
+
+# OS & editor files
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+Desktop.ini
+.idea
+.vscode
+*.iml
+*.iws
+*.ipr
+*.swp
+*~
+
+# Local SOPS / age artifacts
+*.agekey
+*.decrypted.yaml
+*.decrypted.yml
+*.dec.yaml
+*.dec.yml
+.config/sops
