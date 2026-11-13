@@ -50,7 +50,7 @@ jobs:
           set -euo pipefail
           docker build -t scim-server-db:ci .
 
-      - name: Run Flyway migrations (V1 -> V4)
+      - name: Run Flyway migrations (V1 -> V5)
         shell: bash
         run: |
           set -euo pipefail
