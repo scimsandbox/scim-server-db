@@ -50,6 +50,38 @@ jobs:
           set -euo pipefail
           docker build -t scim-server-db:ci .
 
+      - name: Verify runtime UID 65532 filesystem lockdown on /usr/share/flyway
+        shell: bash
+        run: |
+          set -euo pipefail
+          runtime_uid="$(docker run --rm --entrypoint id scim-server-db:ci -u)"
+          if [[ "$runtime_uid" != "65532" ]]; then
+            echo "Expected runtime UID 65532, got $runtime_uid" >&2
+            exit 1
+          fi
+          docker run --rm --entrypoint /usr/share/flyway/flyway scim-server-db:ci -v
+          flyway_target="$(docker run --rm --entrypoint readlink scim-server-db:ci -f /flyway)"
+          if [[ "$flyway_target" != "/usr/share/flyway" ]]; then
+            echo "Expected /flyway symlink to resolve to /usr/share/flyway, got $flyway_target" >&2
+            exit 1
+          fi
+          if docker run --rm --entrypoint test scim-server-db:ci -w /flyway; then
+            echo "ERROR: /flyway is writable by runtime UID 65532" >&2
+            exit 1
+          fi
+          for dir in /usr/share/flyway /usr/share/flyway/sql /usr/share/flyway/conf /usr/share/flyway/jars /usr/share/flyway/drivers; do
+            perms="$(docker run --rm --entrypoint stat scim-server-db:ci -c '%u:%g:%a' "$dir")"
+            echo "$dir -> $perms"
+            if [[ "$perms" != "0:0:555" ]]; then
+              echo "Expected $dir to have 0:0:555, got $perms" >&2
+              exit 1
+            fi
+            if docker run --rm --entrypoint touch scim-server-db:ci "$dir/.write-probe" 2>/dev/null; then
+              echo "ERROR: runtime UID 65532 was able to write to $dir" >&2
+              exit 1
+            fi
+          done
+
       - name: Run Flyway migrations (V1 -> V5)
         shell: bash
         run: |
@@ -79,3 +111,48 @@ jobs:
             -v "$GITHUB_WORKSPACE/scripts:/scripts:ro" \
             postgres:17-alpine \
             psql -h localhost -U scim_user -d scim_db -v ON_ERROR_STOP=1 -f /scripts/verify-schema.sql
+
+      - name: Test V5 data-cleanup migration against pre-V5 dirty rows (V1 -> V4 -> seed -> V5)
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm --network host \
+            -e PGPASSWORD=scim_password \
+            postgres:17-alpine \
+            psql -h localhost -U scim_user -d scim_db -v ON_ERROR_STOP=1 \
+              -c "CREATE DATABASE scim_db_dirty OWNER scim_user;"
+
+          docker run --rm --network host \
+            -e FLYWAY_URL=jdbc:postgresql://localhost:5432/scim_db_dirty \
+            -e FLYWAY_USER=scim_user \
+            -e FLYWAY_PASSWORD=scim_password \
+            -e FLYWAY_TARGET=4 \
+            scim-server-db:ci
+
+          docker run --rm --network host \
+            -e PGPASSWORD=scim_password \
+            -v "$GITHUB_WORKSPACE/scripts:/scripts:ro" \
+            postgres:17-alpine \
+            psql -h localhost -U scim_user -d scim_db_dirty -v ON_ERROR_STOP=1 \
+              -f /scripts/seed-pre-v5-dirty-data.sql
+
+          v5_output="$(docker run --rm --network host \
+            -e FLYWAY_URL=jdbc:postgresql://localhost:5432/scim_db_dirty \
+            -e FLYWAY_USER=scim_user \
+            -e FLYWAY_PASSWORD=scim_password \
+            scim-server-db:ci 2>&1)"
+          echo "$v5_output"
+
+          expected_summary="cleared_empty_passwords=1, nullified_passwords=2, deleted_malformed_tokens=1, deleted_colliding_tokens=2, lowercased_tokens=2, deleted_self_memberships=1, normalized_member_types=4, blanked_unknown_member_types=1, deleted_duplicate_memberships=3"
+          if ! printf '%s\n' "$v5_output" | grep -Fq "$expected_summary"; then
+            echo "Expected V5 Flyway output to include '$expected_summary'" >&2
+            exit 1
+          fi
+
+          docker run --rm --network host \
+            -e PGPASSWORD=scim_password \
+            -v "$GITHUB_WORKSPACE/scripts:/scripts:ro" \
+            postgres:17-alpine \
+            psql -h localhost -U scim_user -d scim_db_dirty -v ON_ERROR_STOP=1 \
+              -f /scripts/verify-v5-cleanup.sql \
+              -f /scripts/verify-schema.sql

@@ -41,6 +41,24 @@ BEGIN
     ) THEN
         RAISE EXCEPTION 'Index idx_scim_async_events_workspace_created_at is missing';
     END IF;
+
+    -- Verify V5 dropped redundant idx_group_memberships_workspace_group_id
+    IF EXISTS (
+        SELECT 1 FROM pg_indexes
+        WHERE tablename = 'scim_group_memberships'
+          AND indexname = 'idx_group_memberships_workspace_group_id'
+    ) THEN
+        RAISE EXCEPTION 'Redundant index idx_group_memberships_workspace_group_id should have been dropped by V5';
+    END IF;
+
+    -- Verify V5 unique index uk_scim_group_memberships_workspace_group_member exists
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_indexes
+        WHERE tablename = 'scim_group_memberships'
+          AND indexname = 'uk_scim_group_memberships_workspace_group_member'
+    ) THEN
+        RAISE EXCEPTION 'Unique index uk_scim_group_memberships_workspace_group_member is missing';
+    END IF;
 END $$;
 
 -- 2. Setup Test Workspace
@@ -212,7 +230,7 @@ EXCEPTION WHEN check_violation THEN
     -- Expected
 END $$;
 
--- 6d. Rejects empty-string or truncated BCrypt prefix in scim_users (V5)
+-- 6d. Rejects empty-string password in scim_users (V5)
 DO $$
 BEGIN
     INSERT INTO scim_users (id, workspace_id, user_name, active, password, created_at, last_modified)
@@ -230,8 +248,38 @@ EXCEPTION WHEN check_violation THEN
     -- Expected
 END $$;
 
+-- 6e. Rejects truncated or malformed BCrypt prefixes in scim_users (V5)
+DO $$
+DECLARE
+    bad_pw TEXT;
+BEGIN
+    FOREACH bad_pw IN ARRAY ARRAY[
+        '$2a$',
+        '$2a$hello',
+        '$2b$10$short',
+        '$2z$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy'
+    ]
+    LOOP
+        BEGIN
+            INSERT INTO scim_users (id, workspace_id, user_name, active, password, created_at, last_modified)
+            VALUES (
+                gen_random_uuid(),
+                '11111111-1111-1111-1111-111111111111',
+                'bad-bcrypt-' || md5(bad_pw) || '@example.com',
+                TRUE,
+                bad_pw,
+                NOW(),
+                NOW()
+            );
+            RAISE EXCEPTION 'Expected check_violation for malformed BCrypt password: %', bad_pw;
+        EXCEPTION WHEN check_violation THEN
+            -- Expected
+        END;
+    END LOOP;
+END $$;
+
 -- 7. V5 Security Integrity Constraints: workspace_tokens
--- 7a. Accepts valid 64-hex SHA-256 token_hash and defaults revoked to FALSE
+-- 7a. Accepts valid lowercase 64-hex SHA-256 token_hash and defaults revoked to FALSE
 INSERT INTO workspace_tokens (id, workspace_id, token_hash, name, created_at, updated_at)
 VALUES (
     '30000000-0000-0000-0000-000000000001',
@@ -269,6 +317,24 @@ BEGIN
         NOW()
     );
     RAISE EXCEPTION 'Expected check_violation for invalid token_hash';
+EXCEPTION WHEN check_violation THEN
+    -- Expected
+END $$;
+
+-- 7c. Rejects uppercase 64-hex token_hash in workspace_tokens (V5)
+DO $$
+BEGIN
+    INSERT INTO workspace_tokens (id, workspace_id, token_hash, name, revoked, created_at, updated_at)
+    VALUES (
+        gen_random_uuid(),
+        '11111111-1111-1111-1111-111111111111',
+        'E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855',
+        'Uppercase Hex Token',
+        FALSE,
+        NOW(),
+        NOW()
+    );
+    RAISE EXCEPTION 'Expected check_violation for uppercase hex token_hash';
 EXCEPTION WHEN check_violation THEN
     -- Expected
 END $$;
