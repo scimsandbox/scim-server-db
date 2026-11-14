@@ -41,6 +41,24 @@ BEGIN
     ) THEN
         RAISE EXCEPTION 'Index idx_scim_async_events_workspace_created_at is missing';
     END IF;
+
+    -- Verify V5 dropped redundant idx_group_memberships_workspace_group_id
+    IF EXISTS (
+        SELECT 1 FROM pg_indexes
+        WHERE tablename = 'scim_group_memberships'
+          AND indexname = 'idx_group_memberships_workspace_group_id'
+    ) THEN
+        RAISE EXCEPTION 'Redundant index idx_group_memberships_workspace_group_id should have been dropped by V5';
+    END IF;
+
+    -- Verify V5 unique index uk_scim_group_memberships_workspace_group_member exists
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_indexes
+        WHERE tablename = 'scim_group_memberships'
+          AND indexname = 'uk_scim_group_memberships_workspace_group_member'
+    ) THEN
+        RAISE EXCEPTION 'Unique index uk_scim_group_memberships_workspace_group_member is missing';
+    END IF;
 END $$;
 
 -- 2. Setup Test Workspace
@@ -153,7 +171,276 @@ EXCEPTION WHEN check_violation THEN
     -- Expected
 END $$;
 
--- 6. Verify Foreign Key Cascade on Workspace Deletion
+-- 6. V3 & V5 Security Integrity Constraints: scim_users
+-- 6a. Accepts NULL password and valid 60-char BCrypt ($2a$/$2b$/$2y$) hashes
+INSERT INTO scim_users (id, workspace_id, user_name, active, password, created_at, last_modified)
+VALUES (
+    '20000000-0000-0000-0000-000000000001',
+    '11111111-1111-1111-1111-111111111111',
+    'Alice@example.com',
+    TRUE,
+    NULL,
+    NOW(),
+    NOW()
+);
+
+INSERT INTO scim_users (id, workspace_id, user_name, active, password, created_at, last_modified)
+VALUES (
+    '20000000-0000-0000-0000-000000000002',
+    '11111111-1111-1111-1111-111111111111',
+    'bob@example.com',
+    TRUE,
+    '$2b$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy',
+    NOW(),
+    NOW()
+);
+
+-- 6b. Rejects case-variant duplicate user_name (V3)
+DO $$
+BEGIN
+    INSERT INTO scim_users (id, workspace_id, user_name, active, created_at, last_modified)
+    VALUES (
+        gen_random_uuid(),
+        '11111111-1111-1111-1111-111111111111',
+        'alice@example.com',
+        TRUE,
+        NOW(),
+        NOW()
+    );
+    RAISE EXCEPTION 'Expected unique_violation for case-insensitive duplicate user_name';
+EXCEPTION WHEN unique_violation THEN
+    -- Expected
+END $$;
+
+-- 6c. Rejects plaintext password in scim_users (V5)
+DO $$
+BEGIN
+    INSERT INTO scim_users (id, workspace_id, user_name, active, password, created_at, last_modified)
+    VALUES (
+        gen_random_uuid(),
+        '11111111-1111-1111-1111-111111111111',
+        'plaintext-user@example.com',
+        TRUE,
+        'PlaintextSecret123!',
+        NOW(),
+        NOW()
+    );
+    RAISE EXCEPTION 'Expected check_violation for plaintext password';
+EXCEPTION WHEN check_violation THEN
+    -- Expected
+END $$;
+
+-- 6d. Rejects empty-string password in scim_users (V5)
+DO $$
+BEGIN
+    INSERT INTO scim_users (id, workspace_id, user_name, active, password, created_at, last_modified)
+    VALUES (
+        gen_random_uuid(),
+        '11111111-1111-1111-1111-111111111111',
+        'empty-pw@example.com',
+        TRUE,
+        '',
+        NOW(),
+        NOW()
+    );
+    RAISE EXCEPTION 'Expected check_violation for empty password';
+EXCEPTION WHEN check_violation THEN
+    -- Expected
+END $$;
+
+-- 6e. Rejects truncated or malformed BCrypt prefixes in scim_users (V5)
+DO $$
+DECLARE
+    bad_pw TEXT;
+BEGIN
+    FOREACH bad_pw IN ARRAY ARRAY[
+        '$2a$',
+        '$2a$hello',
+        '$2b$10$short',
+        '$2z$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy'
+    ]
+    LOOP
+        BEGIN
+            INSERT INTO scim_users (id, workspace_id, user_name, active, password, created_at, last_modified)
+            VALUES (
+                gen_random_uuid(),
+                '11111111-1111-1111-1111-111111111111',
+                'bad-bcrypt-' || md5(bad_pw) || '@example.com',
+                TRUE,
+                bad_pw,
+                NOW(),
+                NOW()
+            );
+            RAISE EXCEPTION 'Expected check_violation for malformed BCrypt password: %', bad_pw;
+        EXCEPTION WHEN check_violation THEN
+            -- Expected
+        END;
+    END LOOP;
+END $$;
+
+-- 7. V5 Security Integrity Constraints: workspace_tokens
+-- 7a. Accepts valid lowercase 64-hex SHA-256 token_hash and defaults revoked to FALSE
+INSERT INTO workspace_tokens (id, workspace_id, token_hash, name, created_at, updated_at)
+VALUES (
+    '30000000-0000-0000-0000-000000000001',
+    '11111111-1111-1111-1111-111111111111',
+    'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+    'CI Valid Token',
+    NOW(),
+    NOW()
+);
+
+DO $$
+DECLARE
+    is_revoked BOOLEAN;
+BEGIN
+    SELECT revoked INTO is_revoked
+    FROM workspace_tokens
+    WHERE id = '30000000-0000-0000-0000-000000000001';
+
+    IF is_revoked IS DISTINCT FROM FALSE THEN
+        RAISE EXCEPTION 'Expected workspace_tokens.revoked DEFAULT FALSE, got %', is_revoked;
+    END IF;
+END $$;
+
+-- 7b. Rejects non-SHA-256 / plaintext token_hash (V5)
+DO $$
+BEGIN
+    INSERT INTO workspace_tokens (id, workspace_id, token_hash, name, revoked, created_at, updated_at)
+    VALUES (
+        gen_random_uuid(),
+        '11111111-1111-1111-1111-111111111111',
+        'not-a-sha256-hex-digest',
+        'Bad Token',
+        FALSE,
+        NOW(),
+        NOW()
+    );
+    RAISE EXCEPTION 'Expected check_violation for invalid token_hash';
+EXCEPTION WHEN check_violation THEN
+    -- Expected
+END $$;
+
+-- 7c. Rejects uppercase 64-hex token_hash in workspace_tokens (V5)
+DO $$
+BEGIN
+    INSERT INTO workspace_tokens (id, workspace_id, token_hash, name, revoked, created_at, updated_at)
+    VALUES (
+        gen_random_uuid(),
+        '11111111-1111-1111-1111-111111111111',
+        'E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855',
+        'Uppercase Hex Token',
+        FALSE,
+        NOW(),
+        NOW()
+    );
+    RAISE EXCEPTION 'Expected check_violation for uppercase hex token_hash';
+EXCEPTION WHEN check_violation THEN
+    -- Expected
+END $$;
+
+-- 8. V5 Security Integrity Constraints: scim_group_memberships
+INSERT INTO scim_groups (id, workspace_id, display_name, created_at, last_modified)
+VALUES (
+    '40000000-0000-0000-0000-000000000001',
+    '11111111-1111-1111-1111-111111111111',
+    'Engineering',
+    NOW(),
+    NOW()
+);
+
+INSERT INTO scim_groups (id, workspace_id, display_name, created_at, last_modified)
+VALUES (
+    '40000000-0000-0000-0000-000000000002',
+    '11111111-1111-1111-1111-111111111111',
+    'Backend',
+    NOW(),
+    NOW()
+);
+
+-- 8a. Accepts allowed member_type values ('User', 'Group', '')
+INSERT INTO scim_group_memberships (id, group_id, workspace_id, member_value, member_type, display)
+VALUES (
+    '50000000-0000-0000-0000-000000000001',
+    '40000000-0000-0000-0000-000000000001',
+    '11111111-1111-1111-1111-111111111111',
+    '20000000-0000-0000-0000-000000000001',
+    'User',
+    'Alice'
+);
+
+INSERT INTO scim_group_memberships (id, group_id, workspace_id, member_value, member_type, display)
+VALUES (
+    '50000000-0000-0000-0000-000000000002',
+    '40000000-0000-0000-0000-000000000001',
+    '11111111-1111-1111-1111-111111111111',
+    '40000000-0000-0000-0000-000000000002',
+    'Group',
+    'Backend'
+);
+
+INSERT INTO scim_group_memberships (id, group_id, workspace_id, member_value, member_type, display)
+VALUES (
+    '50000000-0000-0000-0000-000000000003',
+    '40000000-0000-0000-0000-000000000001',
+    '11111111-1111-1111-1111-111111111111',
+    '20000000-0000-0000-0000-000000000002',
+    '',
+    'Bob'
+);
+
+-- 8b. Rejects duplicate (workspace_id, group_id, member_value)
+DO $$
+BEGIN
+    INSERT INTO scim_group_memberships (id, group_id, workspace_id, member_value, member_type, display)
+    VALUES (
+        gen_random_uuid(),
+        '40000000-0000-0000-0000-000000000001',
+        '11111111-1111-1111-1111-111111111111',
+        '20000000-0000-0000-0000-000000000001',
+        'User',
+        'Alice Duplicate'
+    );
+    RAISE EXCEPTION 'Expected unique_violation for duplicate group membership';
+EXCEPTION WHEN unique_violation THEN
+    -- Expected
+END $$;
+
+-- 8c. Rejects invalid member_type
+DO $$
+BEGIN
+    INSERT INTO scim_group_memberships (id, group_id, workspace_id, member_value, member_type, display)
+    VALUES (
+        gen_random_uuid(),
+        '40000000-0000-0000-0000-000000000002',
+        '11111111-1111-1111-1111-111111111111',
+        '20000000-0000-0000-0000-000000000001',
+        'InvalidType',
+        'Alice'
+    );
+    RAISE EXCEPTION 'Expected check_violation for invalid member_type';
+EXCEPTION WHEN check_violation THEN
+    -- Expected
+END $$;
+
+-- 8d. Rejects self-referential group membership (member_value = group_id)
+DO $$
+BEGIN
+    INSERT INTO scim_group_memberships (id, group_id, workspace_id, member_value, member_type, display)
+    VALUES (
+        gen_random_uuid(),
+        '40000000-0000-0000-0000-000000000001',
+        '11111111-1111-1111-1111-111111111111',
+        '40000000-0000-0000-0000-000000000001',
+        'Group',
+        'Self'
+    );
+    RAISE EXCEPTION 'Expected check_violation for self-referential group membership';
+EXCEPTION WHEN check_violation THEN
+    -- Expected
+END $$;
+
+-- 9. Verify Foreign Key Cascade on Workspace Deletion
 DELETE FROM workspaces WHERE id = '11111111-1111-1111-1111-111111111111';
 
 DO $$

@@ -1,0 +1,5 @@
+# scim-server-db is a short-lived, one-shot Flyway migration container executed
+# as a Kubernetes initContainer or Docker Compose startup job rather than a
+# long-running daemon, so a Dockerfile HEALTHCHECK instruction is not applicable.
+AVD-DS-0026
+DS-0026

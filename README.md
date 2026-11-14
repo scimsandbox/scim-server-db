@@ -27,6 +27,10 @@ This repository is the standalone database migration bundle for the SCIM Sandbox
   - Enforces uppercase HTTP methods (`POST`, `PUT`, `PATCH`, `DELETE`) via `chk_scim_async_events_operation`.
   - Enforces strict lifecycle state invariants via `chk_scim_async_events_lifecycle` (`PENDING` requires null `completed_at` and null `set_payload`; `COMPLETED` and `FAILED` require non-null values for both).
   - Configures indexes for per-workspace reverse-chronological ordering (`idx_scim_async_events_workspace_created_at`) and partial index on active operations for the stale-`PENDING` reaper (`idx_scim_async_events_pending_created_at`).
+- **`V5` (Security & integrity constraints)**:
+  - Sanitizes legacy non-BCrypt `scim_users.password` values and enforces modular crypt BCrypt (`$2a$`/`$2b$`/`$2y$`) hash format (`chk_scim_users_password_bcrypt`).
+  - Enforces 64-character hex SHA-256 format (`chk_workspace_tokens_hash_format`) and `DEFAULT FALSE` on `workspace_tokens.revoked`.
+  - Deduplicates and constrains `scim_group_memberships` with `UNIQUE (workspace_id, group_id, member_value)`, `CHECK (member_type IN ('User', 'Group', ''))`, and `CHECK (member_value <> group_id)`.
 
 ## Working With Migrations
 
