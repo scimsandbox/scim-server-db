@@ -9,7 +9,6 @@ BEGIN;
 DO $$
 DECLARE
     pw_val TEXT;
-    tok_hash TEXT;
     cnt INTEGER;
     m_type TEXT;
     m_disp TEXT;
@@ -33,38 +32,40 @@ BEGIN
         RAISE EXCEPTION 'Expected all 4 NULL/empty/plaintext/malformed-prefix passwords to be NULL, got %', cnt;
     END IF;
 
-    -- 2. Verify workspace_tokens cleanup, collision resolution, and lowercase normalization
+    -- 2. Verify workspace_tokens cleanup: only canonical lowercase 64-hex rows survive,
+    --    revoked state on surviving rows is preserved, and uppercase/mixed/malformed rows are deleted
     SELECT COUNT(*) INTO cnt
     FROM workspace_tokens
     WHERE workspace_id = '77777777-7777-7777-7777-777777777777';
-    IF cnt <> 4 THEN
-        RAISE EXCEPTION 'Expected 4 surviving workspace_tokens rows, got %', cnt;
+    IF cnt <> 2 THEN
+        RAISE EXCEPTION 'Expected 2 surviving workspace_tokens rows, got %', cnt;
     END IF;
 
-    SELECT token_hash INTO tok_hash
-    FROM workspace_tokens
-    WHERE id = '72000000-0000-0000-0000-000000000002';
-    IF tok_hash IS DISTINCT FROM 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' THEN
-        RAISE EXCEPTION 'Expected uppercase token_hash to be normalized to lowercase, got %', tok_hash;
+    IF NOT EXISTS (
+        SELECT 1 FROM workspace_tokens
+        WHERE id = '72000000-0000-0000-0000-000000000001'
+          AND token_hash = 'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'
+          AND revoked = FALSE
+    ) THEN
+        RAISE EXCEPTION 'Expected active canonical lowercase token 72000000-0000-0000-0000-000000000001 to remain intact';
     END IF;
 
-    IF NOT EXISTS (SELECT 1 FROM workspace_tokens WHERE id = '72000000-0000-0000-0000-000000000003') THEN
-        RAISE EXCEPTION 'Expected lowercase survivor 72000000-0000-0000-0000-000000000003 to remain';
-    END IF;
-
-    SELECT token_hash INTO tok_hash
-    FROM workspace_tokens
-    WHERE id = '72000000-0000-0000-0000-000000000006';
-    IF tok_hash IS DISTINCT FROM 'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd' THEN
-        RAISE EXCEPTION 'Expected mixed-case collision survivor 72000000-0000-0000-0000-000000000006 to be lowercased, got %', tok_hash;
+    IF NOT EXISTS (
+        SELECT 1 FROM workspace_tokens
+        WHERE id = '72000000-0000-0000-0000-000000000002'
+          AND token_hash = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+          AND revoked = TRUE
+    ) THEN
+        RAISE EXCEPTION 'Expected revoked canonical lowercase token 72000000-0000-0000-0000-000000000002 to remain revoked';
     END IF;
 
     IF EXISTS (SELECT 1 FROM workspace_tokens WHERE id IN (
+        '72000000-0000-0000-0000-000000000003',
         '72000000-0000-0000-0000-000000000004',
         '72000000-0000-0000-0000-000000000005',
-        '72000000-0000-0000-0000-000000000007'
+        '72000000-0000-0000-0000-000000000006'
     )) THEN
-        RAISE EXCEPTION 'Expected colliding uppercase/mixed-case and malformed workspace_tokens rows to be deleted';
+        RAISE EXCEPTION 'Expected uppercase, mixed-case, and malformed workspace_tokens rows to be deleted';
     END IF;
 
     -- 3. Verify scim_group_memberships self-ref deletion, member_type normalization, and deterministic deduplication

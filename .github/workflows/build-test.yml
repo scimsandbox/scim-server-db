@@ -44,43 +44,116 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Build scim-server-db:ci image
+      - name: Build scim-server-db:ci image and guard against OverlayFS layer bloat
         shell: bash
         run: |
           set -euo pipefail
+          base_image="$(awk '/^FROM / {print $2; exit}' Dockerfile)"
+          if [[ -z "$base_image" ]]; then
+            echo "ERROR: failed to parse FROM base image from Dockerfile" >&2
+            exit 1
+          fi
+          docker pull "$base_image"
           docker build -t scim-server-db:ci .
+
+          base_size="$(docker image inspect --format '{{.Size}}' "$base_image")"
+          ci_size="$(docker image inspect --format '{{.Size}}' scim-server-db:ci)"
+          delta=$(( ci_size - base_size ))
+          echo "Image size check: base=${base_size}B, scim-server-db:ci=${ci_size}B, delta=${delta}B"
+          if (( delta > 5242880 )); then
+            echo "ERROR: scim-server-db:ci added ${delta} bytes (> 5242880 bytes / 5 MiB) over base image; check Dockerfile for unintended OverlayFS copy-up" >&2
+            exit 1
+          fi
 
       - name: Verify runtime UID 65532 filesystem lockdown on /usr/share/flyway
         shell: bash
         run: |
           set -euo pipefail
-          runtime_uid="$(docker run --rm --entrypoint id scim-server-db:ci -u)"
-          if [[ "$runtime_uid" != "65532" ]]; then
-            echo "Expected runtime UID 65532, got $runtime_uid" >&2
-            exit 1
-          fi
           docker run --rm --entrypoint /usr/share/flyway/flyway scim-server-db:ci -v
-          flyway_target="$(docker run --rm --entrypoint readlink scim-server-db:ci -f /flyway)"
-          if [[ "$flyway_target" != "/usr/share/flyway" ]]; then
-            echo "Expected /flyway symlink to resolve to /usr/share/flyway, got $flyway_target" >&2
-            exit 1
-          fi
-          if docker run --rm --entrypoint test scim-server-db:ci -w /flyway; then
-            echo "ERROR: /flyway is writable by runtime UID 65532" >&2
-            exit 1
-          fi
-          for dir in /usr/share/flyway /usr/share/flyway/sql /usr/share/flyway/conf /usr/share/flyway/jars /usr/share/flyway/drivers; do
-            perms="$(docker run --rm --entrypoint stat scim-server-db:ci -c '%u:%g:%a' "$dir")"
-            echo "$dir -> $perms"
-            if [[ "$perms" != "0:0:555" ]]; then
-              echo "Expected $dir to have 0:0:555, got $perms" >&2
+
+          # Fail-closed inside a single /bin/bash invocation so any missing binary or
+          # container runtime error aborts immediately instead of silently passing.
+          docker run --rm --entrypoint /bin/bash scim-server-db:ci -euo pipefail -c '
+            uid="$(id -u)"
+            gid="$(id -g)"
+            if [[ "$uid" != "65532" || "$gid" != "65532" ]]; then
+              echo "Expected runtime 65532:65532, got ${uid}:${gid}" >&2
               exit 1
             fi
-            if docker run --rm --entrypoint touch scim-server-db:ci "$dir/.write-probe" 2>/dev/null; then
-              echo "ERROR: runtime UID 65532 was able to write to $dir" >&2
+
+            # Positive controls on /tmp proving /usr/bin/test, touch, rm, stat, and readlink work
+            /usr/bin/test -d /tmp
+            /usr/bin/test -w /tmp
+            touch /tmp/.write-probe
+            /usr/bin/test -f /tmp/.write-probe
+            rm /tmp/.write-probe
+            /usr/bin/test ! -e /tmp/.write-probe
+
+            # Verify /flyway symlink resolves to /usr/share/flyway and is not writable
+            /usr/bin/test -L /flyway
+            flyway_target="$(readlink -f /flyway)"
+            if [[ "$flyway_target" != "/usr/share/flyway" ]]; then
+              echo "Expected /flyway symlink to resolve to /usr/share/flyway, got $flyway_target" >&2
               exit 1
             fi
-          done
+            /usr/bin/test -d /flyway
+            if /usr/bin/test -w /flyway; then
+              echo "ERROR: /flyway is writable by runtime UID $uid" >&2
+              exit 1
+            fi
+
+            # Verify locked-down directories and require touch to fail with Permission denied
+            for dir in /usr/share/flyway /usr/share/flyway/sql /usr/share/flyway/conf /usr/share/flyway/jars /usr/share/flyway/drivers; do
+              [[ -d "$dir" ]]
+              perms="$(stat -c "%u:%g:%a" "$dir")"
+              echo "$dir -> $perms"
+              if [[ "$perms" != "0:0:555" ]]; then
+                echo "Expected $dir to have 0:0:555, got $perms" >&2
+                exit 1
+              fi
+              if [[ -w "$dir" ]]; then
+                echo "ERROR: $dir reported writable by UID $uid" >&2
+                exit 1
+              fi
+              set +e
+              err="$(LC_ALL=C touch "$dir/.write-probe" 2>&1)"
+              rc=$?
+              set -e
+              if [[ "$rc" -eq 0 ]]; then
+                echo "ERROR: runtime UID $uid was able to write to $dir" >&2
+                exit 1
+              fi
+              if [[ "$err" != *"Permission denied"* && "$err" != *"Read-only file system"* ]]; then
+                echo "ERROR: unexpected failure probing $dir (rc=$rc): $err" >&2
+                exit 1
+              fi
+            done
+
+            # Walk the entire /usr/share/flyway tree to verify root ownership, non-writability,
+            # and removal of the unused MSSQL JDBC driver jar.
+            shopt -s globstar nullglob dotglob
+            entries=(/usr/share/flyway /usr/share/flyway/**)
+            if (( ${#entries[@]} < 10 )); then
+              echo "ERROR: expected populated /usr/share/flyway tree, found ${#entries[@]} entries" >&2
+              exit 1
+            fi
+            for path in "${entries[@]}"; do
+              owner="$(stat -c "%u:%g" "$path")"
+              if [[ "$owner" != "0:0" ]]; then
+                echo "ERROR: expected $path owner 0:0, got $owner" >&2
+                exit 1
+              fi
+              if [[ ! -L "$path" && -w "$path" ]]; then
+                echo "ERROR: $path is writable by runtime UID $uid" >&2
+                exit 1
+              fi
+              if [[ "$path" == *mssql-jdbc* ]]; then
+                echo "ERROR: unused MSSQL driver jar still present: $path" >&2
+                exit 1
+              fi
+            done
+            echo "Verified ${#entries[@]} /usr/share/flyway entries: all 0:0, non-writable, no mssql-jdbc."
+          '
 
       - name: Run Flyway migrations (V1 -> V5)
         shell: bash
@@ -143,7 +216,7 @@ jobs:
             scim-server-db:ci 2>&1)"
           echo "$v5_output"
 
-          expected_summary="cleared_empty_passwords=1, nullified_passwords=2, deleted_malformed_tokens=1, deleted_colliding_tokens=2, lowercased_tokens=2, deleted_self_memberships=1, normalized_member_types=4, blanked_unknown_member_types=1, deleted_duplicate_memberships=3"
+          expected_summary="cleared_empty_passwords=1, nullified_passwords=2, deleted_invalid_tokens=4, deleted_self_memberships=1, normalized_member_types=4, blanked_unknown_member_types=1, deleted_duplicate_memberships=3"
           if ! printf '%s\n' "$v5_output" | grep -Fq "$expected_summary"; then
             echo "Expected V5 Flyway output to include '$expected_summary'" >&2
             exit 1

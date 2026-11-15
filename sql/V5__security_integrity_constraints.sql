@@ -4,9 +4,9 @@
 -- multi-tenant tables while auditing and normalizing pre-V5 legacy rows:
 -- 1. Sanitizes legacy non-BCrypt (including empty-string) scim_users.password values
 --    to NULL before enforcing modular crypt BCrypt ($2a$/$2b$/$2y$) format.
--- 2. Removes malformed workspace_tokens rows, resolves any hex-case collisions,
---    normalizes valid 64-hex digests to lowercase, and enforces lowercase 64-hex
---    SHA-256 token_hash format plus DEFAULT FALSE on revoked.
+-- 2. Removes workspace_tokens rows whose token_hash is not a canonical lowercase
+--    64-hex SHA-256 digest and enforces lowercase 64-hex SHA-256 token_hash
+--    format plus DEFAULT FALSE on revoked.
 -- 3. Removes self-referential (member_value = group_id) rows in scim_group_memberships,
 --    normalizes case/whitespace variants of member_type ('User', 'Group', '') before
 --    blanking unrecognized values, deduplicates (workspace_id, group_id, member_value)
@@ -17,9 +17,7 @@ DO $$
 DECLARE
     cleared_empty_passwords       BIGINT := 0;
     nullified_passwords           BIGINT := 0;
-    deleted_malformed_tokens      BIGINT := 0;
-    deleted_colliding_tokens      BIGINT := 0;
-    lowercased_tokens             BIGINT := 0;
+    deleted_invalid_tokens        BIGINT := 0;
     deleted_self_memberships      BIGINT := 0;
     normalized_member_types       BIGINT := 0;
     blanked_unknown_member_types  BIGINT := 0;
@@ -44,41 +42,15 @@ BEGIN
         RAISE WARNING 'V5 cleanup: nullified % non-BCrypt scim_users.password value(s)', nullified_passwords;
     END IF;
 
-    -- 2a. Delete workspace_tokens rows whose token_hash is not a 64-character hex SHA-256 digest
+    -- 2. Delete workspace_tokens rows whose token_hash is not a canonical lowercase 64-hex SHA-256 digest.
+    --    All SCIM Sandbox services generate and query strictly lowercase SHA-256 hex digests, so any
+    --    uppercase/mixed-case or non-64-hex row could never authenticate; deleting rather than lowercasing
+    --    prevents activating dormant rows or superseding revoked tokens on case collisions.
     DELETE FROM workspace_tokens
-    WHERE token_hash !~ '^[0-9a-fA-F]{64}$';
-    GET DIAGNOSTICS deleted_malformed_tokens = ROW_COUNT;
-    IF deleted_malformed_tokens > 0 THEN
-        RAISE WARNING 'V5 cleanup: deleted % malformed workspace_tokens row(s)', deleted_malformed_tokens;
-    END IF;
-
-    -- 2b. Resolve case-only 64-hex collisions before lowercasing (workspace_tokens.token_hash is UNIQUE)
-    DELETE FROM workspace_tokens t
-    USING (
-        SELECT id,
-               ROW_NUMBER() OVER (
-                   PARTITION BY LOWER(token_hash)
-                   ORDER BY CASE WHEN token_hash = LOWER(token_hash) THEN 0 ELSE 1 END,
-                            CASE WHEN revoked = FALSE THEN 0 ELSE 1 END,
-                            created_at DESC,
-                            id ASC
-               ) AS rn
-        FROM workspace_tokens
-    ) dupes
-    WHERE t.id = dupes.id
-      AND dupes.rn > 1;
-    GET DIAGNOSTICS deleted_colliding_tokens = ROW_COUNT;
-    IF deleted_colliding_tokens > 0 THEN
-        RAISE WARNING 'V5 cleanup: deleted % case-colliding workspace_tokens row(s)', deleted_colliding_tokens;
-    END IF;
-
-    -- 2c. Normalize any uppercase/mixed-case 64-hex token_hash digests to lowercase
-    UPDATE workspace_tokens
-    SET token_hash = LOWER(token_hash)
-    WHERE token_hash <> LOWER(token_hash);
-    GET DIAGNOSTICS lowercased_tokens = ROW_COUNT;
-    IF lowercased_tokens > 0 THEN
-        RAISE WARNING 'V5 cleanup: normalized % uppercase workspace_tokens.token_hash row(s) to lowercase', lowercased_tokens;
+    WHERE token_hash !~ '^[0-9a-f]{64}$';
+    GET DIAGNOSTICS deleted_invalid_tokens = ROW_COUNT;
+    IF deleted_invalid_tokens > 0 THEN
+        RAISE WARNING 'V5 cleanup: deleted % invalid workspace_tokens row(s) (non-lowercase-hex or malformed)', deleted_invalid_tokens;
     END IF;
 
     -- 3a. Delete self-referential group memberships
@@ -134,12 +106,10 @@ BEGIN
         RAISE WARNING 'V5 cleanup: deleted % duplicate scim_group_memberships row(s)', deleted_duplicate_memberships;
     END IF;
 
-    RAISE NOTICE 'V5 security integrity summary: cleared_empty_passwords=%, nullified_passwords=%, deleted_malformed_tokens=%, deleted_colliding_tokens=%, lowercased_tokens=%, deleted_self_memberships=%, normalized_member_types=%, blanked_unknown_member_types=%, deleted_duplicate_memberships=%',
+    RAISE NOTICE 'V5 security integrity summary: cleared_empty_passwords=%, nullified_passwords=%, deleted_invalid_tokens=%, deleted_self_memberships=%, normalized_member_types=%, blanked_unknown_member_types=%, deleted_duplicate_memberships=%',
         cleared_empty_passwords,
         nullified_passwords,
-        deleted_malformed_tokens,
-        deleted_colliding_tokens,
-        lowercased_tokens,
+        deleted_invalid_tokens,
         deleted_self_memberships,
         normalized_member_types,
         blanked_unknown_member_types,
