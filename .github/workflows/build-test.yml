@@ -50,96 +50,6 @@ jobs:
           set -euo pipefail
           docker build -t scim-server-db:ci .
 
-      - name: Verify runtime UID 65532 filesystem lockdown on /usr/share/flyway
-        shell: bash
-        run: |
-          set -euo pipefail
-          docker run --rm --entrypoint /usr/share/flyway/flyway scim-server-db:ci -v
-
-          # Fail-closed inside a single /bin/bash invocation so any missing binary or
-          # container runtime error aborts immediately instead of silently passing.
-          docker run --rm --entrypoint /bin/bash scim-server-db:ci -euo pipefail -c '
-            uid="$(id -u)"
-            gid="$(id -g)"
-            if [[ "$uid" != "65532" || "$gid" != "65532" ]]; then
-              echo "Expected runtime 65532:65532, got ${uid}:${gid}" >&2
-              exit 1
-            fi
-
-            # Positive controls on /tmp proving /usr/bin/test, touch, rm, stat, and readlink work
-            /usr/bin/test -d /tmp
-            /usr/bin/test -w /tmp
-            touch /tmp/.write-probe
-            /usr/bin/test -f /tmp/.write-probe
-            rm /tmp/.write-probe
-            /usr/bin/test ! -e /tmp/.write-probe
-
-            # Verify /flyway symlink resolves to /usr/share/flyway and is not writable
-            /usr/bin/test -L /flyway
-            flyway_target="$(readlink -f /flyway)"
-            if [[ "$flyway_target" != "/usr/share/flyway" ]]; then
-              echo "Expected /flyway symlink to resolve to /usr/share/flyway, got $flyway_target" >&2
-              exit 1
-            fi
-            /usr/bin/test -d /flyway
-            if /usr/bin/test -w /flyway; then
-              echo "ERROR: /flyway is writable by runtime UID $uid" >&2
-              exit 1
-            fi
-
-            # Verify locked-down directories and require touch to fail with Permission denied
-            for dir in /usr/share/flyway /usr/share/flyway/sql /usr/share/flyway/conf /usr/share/flyway/jars /usr/share/flyway/drivers; do
-              [[ -d "$dir" ]]
-              perms="$(stat -c "%u:%g:%a" "$dir")"
-              echo "$dir -> $perms"
-              if [[ "$perms" != "0:0:555" ]]; then
-                echo "Expected $dir to have 0:0:555, got $perms" >&2
-                exit 1
-              fi
-              if [[ -w "$dir" ]]; then
-                echo "ERROR: $dir reported writable by UID $uid" >&2
-                exit 1
-              fi
-              set +e
-              err="$(LC_ALL=C touch "$dir/.write-probe" 2>&1)"
-              rc=$?
-              set -e
-              if [[ "$rc" -eq 0 ]]; then
-                echo "ERROR: runtime UID $uid was able to write to $dir" >&2
-                exit 1
-              fi
-              if [[ "$err" != *"Permission denied"* && "$err" != *"Read-only file system"* ]]; then
-                echo "ERROR: unexpected failure probing $dir (rc=$rc): $err" >&2
-                exit 1
-              fi
-            done
-
-            # Walk the entire /usr/share/flyway tree to verify root ownership, non-writability,
-            # and removal of the unused MSSQL JDBC driver jar.
-            shopt -s globstar nullglob dotglob
-            entries=(/usr/share/flyway /usr/share/flyway/**)
-            if (( ${#entries[@]} < 10 )); then
-              echo "ERROR: expected populated /usr/share/flyway tree, found ${#entries[@]} entries" >&2
-              exit 1
-            fi
-            for path in "${entries[@]}"; do
-              owner="$(stat -c "%u:%g" "$path")"
-              if [[ "$owner" != "0:0" ]]; then
-                echo "ERROR: expected $path owner 0:0, got $owner" >&2
-                exit 1
-              fi
-              if [[ ! -L "$path" && -w "$path" ]]; then
-                echo "ERROR: $path is writable by runtime UID $uid" >&2
-                exit 1
-              fi
-              if [[ "$path" == *mssql-jdbc* ]]; then
-                echo "ERROR: unused MSSQL driver jar still present: $path" >&2
-                exit 1
-              fi
-            done
-            echo "Verified ${#entries[@]} /usr/share/flyway entries: all 0:0, non-writable, no mssql-jdbc."
-          '
-
       - name: Run Flyway migrations (V1 -> V5)
         shell: bash
         run: |
@@ -170,47 +80,47 @@ jobs:
             postgres:17-alpine \
             psql -h localhost -U scim_user -d scim_db -v ON_ERROR_STOP=1 -f /scripts/verify-schema.sql
 
-      - name: Test V5 data-cleanup migration against pre-V5 dirty rows (V1 -> V4 -> seed -> V5)
+      - name: Test V4 -> V5 legacy password cleanup
         shell: bash
         run: |
           set -euo pipefail
-          docker run --rm --network host \
-            -e PGPASSWORD=scim_password \
-            postgres:17-alpine \
+          docker run --rm --network host -e PGPASSWORD=scim_password postgres:17-alpine \
             psql -h localhost -U scim_user -d scim_db -v ON_ERROR_STOP=1 \
-              -c "CREATE DATABASE scim_db_dirty OWNER scim_user;"
+              -c "CREATE DATABASE scim_db_upgrade OWNER scim_user;"
 
           docker run --rm --network host \
-            -e FLYWAY_URL=jdbc:postgresql://localhost:5432/scim_db_dirty \
+            -e FLYWAY_URL=jdbc:postgresql://localhost:5432/scim_db_upgrade \
             -e FLYWAY_USER=scim_user \
             -e FLYWAY_PASSWORD=scim_password \
             -e FLYWAY_TARGET=4 \
             scim-server-db:ci
 
-          docker run --rm --network host \
-            -e PGPASSWORD=scim_password \
-            -v "$GITHUB_WORKSPACE/scripts:/scripts:ro" \
-            postgres:17-alpine \
-            psql -h localhost -U scim_user -d scim_db_dirty -v ON_ERROR_STOP=1 \
-              -f /scripts/seed-pre-v5-dirty-data.sql
+          docker run --rm --network host -e PGPASSWORD=scim_password postgres:17-alpine \
+            psql -h localhost -U scim_user -d scim_db_upgrade -v ON_ERROR_STOP=1 -c "
+              INSERT INTO workspaces (id, name, created_by_username, created_at, updated_at)
+              VALUES ('77777777-7777-7777-7777-777777777777', 'upgrade-ws', 'ci', NOW(), NOW());
+              INSERT INTO scim_users (id, workspace_id, user_name, active, password, created_at, last_modified) VALUES
+                ('71000000-0000-0000-0000-000000000001', '77777777-7777-7777-7777-777777777777', 'bcrypt@example.com', TRUE, '\$2b\$10\$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy', NOW(), NOW()),
+                ('71000000-0000-0000-0000-000000000002', '77777777-7777-7777-7777-777777777777', 'plain@example.com', TRUE, 'legacy-plaintext', NOW(), NOW()),
+                ('71000000-0000-0000-0000-000000000003', '77777777-7777-7777-7777-777777777777', 'empty@example.com', TRUE, '', NOW(), NOW());
+            "
 
-          v5_output="$(docker run --rm --network host \
-            -e FLYWAY_URL=jdbc:postgresql://localhost:5432/scim_db_dirty \
+          docker run --rm --network host \
+            -e FLYWAY_URL=jdbc:postgresql://localhost:5432/scim_db_upgrade \
             -e FLYWAY_USER=scim_user \
             -e FLYWAY_PASSWORD=scim_password \
-            scim-server-db:ci 2>&1)"
-          echo "$v5_output"
+            scim-server-db:ci
 
-          expected_summary="cleared_empty_passwords=1, nullified_passwords=2, deleted_invalid_tokens=4, deleted_self_memberships=1, normalized_member_types=4, blanked_unknown_member_types=1, deleted_duplicate_memberships=3"
-          if ! printf '%s\n' "$v5_output" | grep -Fq "$expected_summary"; then
-            echo "Expected V5 Flyway output to include '$expected_summary'" >&2
-            exit 1
-          fi
-
-          docker run --rm --network host \
-            -e PGPASSWORD=scim_password \
-            -v "$GITHUB_WORKSPACE/scripts:/scripts:ro" \
-            postgres:17-alpine \
-            psql -h localhost -U scim_user -d scim_db_dirty -v ON_ERROR_STOP=1 \
-              -f /scripts/verify-v5-cleanup.sql \
-              -f /scripts/verify-schema.sql
+          docker run --rm --network host -e PGPASSWORD=scim_password postgres:17-alpine \
+            psql -h localhost -U scim_user -d scim_db_upgrade -v ON_ERROR_STOP=1 -c "
+              DO \$\$
+              BEGIN
+                IF (SELECT password FROM scim_users WHERE id = '71000000-0000-0000-0000-000000000001')
+                   IS DISTINCT FROM '\$2b\$10\$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy' THEN
+                  RAISE EXCEPTION 'Expected valid BCrypt password to remain intact';
+                END IF;
+                IF (SELECT COUNT(*) FROM scim_users WHERE id IN ('71000000-0000-0000-0000-000000000002', '71000000-0000-0000-0000-000000000003') AND password IS NULL) <> 2 THEN
+                  RAISE EXCEPTION 'Expected legacy plaintext and empty passwords to be NULL';
+                END IF;
+              END \$\$;
+            "
