@@ -118,11 +118,13 @@ jobs:
 
       - name: Ensure release tag does not exist
         shell: bash
+        env:
+          TAG_NAME: ${{ steps.version.outputs.tag_name }}
         run: |
           set -euo pipefail
 
-          if git ls-remote --exit-code --tags origin "refs/tags/${{ steps.version.outputs.tag_name }}" >/dev/null 2>&1; then
-            echo "Tag ${{ steps.version.outputs.tag_name }} already exists"
+          if git ls-remote --exit-code --tags origin "refs/tags/${TAG_NAME}" >/dev/null 2>&1; then
+            echo "Tag ${TAG_NAME} already exists"
             exit 1
           fi
 
@@ -139,7 +141,7 @@ jobs:
           push: false
           tags: scim-server-db:pre-release-scan
 
-      - name: Run Flyway migrations (V1 -> V4)
+      - name: Run Flyway migrations (V1 -> V5)
         shell: bash
         run: |
           set -euo pipefail
@@ -179,6 +181,7 @@ jobs:
           format: table
           exit-code: "1"
           severity: CRITICAL,HIGH
+          trivyignores: ".trivyignore"
           ignore-unfixed: true
           vuln-type: os,library
 
@@ -190,24 +193,29 @@ jobs:
           format: table
           exit-code: "1"
           severity: CRITICAL,HIGH
+          trivyignores: ".trivyignore"
           skip-setup-trivy: true
 
       - name: Commit version bump
         shell: bash
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.release_version }}
         run: |
           set -euo pipefail
 
-          printf '%s\n' "${{ steps.version.outputs.release_version }}" > VERSION
+          printf '%s\n' "${RELEASE_VERSION}" > VERSION
           git add VERSION
-          git commit -m "chore(release): v${{ steps.version.outputs.release_version }} [skip ci]"
+          git commit -m "chore(release): v${RELEASE_VERSION} [skip ci]"
 
       - name: Package release bundle
         shell: bash
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.release_version }}
         run: |
           set -euo pipefail
 
           mkdir -p dist
-          tar -czf "dist/scim-server-db-${{ steps.version.outputs.release_version }}.tar.gz" \
+          tar -czf "dist/scim-server-db-${RELEASE_VERSION}.tar.gz" \
             Dockerfile \
             LICENSE \
             VERSION \
@@ -220,25 +228,28 @@ jobs:
         shell: bash
         env:
           TARGET_BRANCH: ${{ github.ref_name }}
+          TAG_NAME: ${{ steps.version.outputs.tag_name }}
         run: |
           set -euo pipefail
 
           git push origin "HEAD:${TARGET_BRANCH}"
-          git tag -a "${{ steps.version.outputs.tag_name }}" -m "Release ${{ steps.version.outputs.tag_name }}"
-          git push origin "refs/tags/${{ steps.version.outputs.tag_name }}"
+          git tag -a "${TAG_NAME}" -m "Release ${TAG_NAME}"
+          git push origin "refs/tags/${TAG_NAME}"
 
       - name: Create GitHub release
         shell: bash
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          TAG_NAME: ${{ steps.version.outputs.tag_name }}
+          RELEASE_VERSION: ${{ steps.version.outputs.release_version }}
         run: |
           set -euo pipefail
 
-          gh release create "${{ steps.version.outputs.tag_name }}" \
+          gh release create "${TAG_NAME}" \
             --verify-tag \
             --generate-notes \
-            --title "${{ steps.version.outputs.tag_name }}" \
-            "dist/scim-server-db-${{ steps.version.outputs.release_version }}.tar.gz#scim-server-db-${{ steps.version.outputs.release_version }}.tar.gz"
+            --title "${TAG_NAME}" \
+            "dist/scim-server-db-${RELEASE_VERSION}.tar.gz#scim-server-db-${RELEASE_VERSION}.tar.gz"
 
   attest:
     name: Attest release artifacts
