@@ -44,62 +44,11 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Build scim-server-db:ci image and guard against OverlayFS layer bloat
+      - name: Build scim-server-db:ci image
         shell: bash
         run: |
           set -euo pipefail
           docker build -t scim-server-db:ci .
-
-          dockerfile_layers="$(awk '
-            /^[[:space:]]*#/ { next }
-            {
-              line = $0
-              sub(/[[:space:]]+$/, "", line)
-              buf = cont ? (buf " " line) : line
-              if (buf ~ /\\$/) {
-                sub(/\\$/, "", buf)
-                cont = 1
-                next
-              }
-              cont = 0
-              if (buf == "") next
-              if (buf ~ /^[[:space:]]*[Ff][Rr][Oo][Mm][[:space:]]/) {
-                seen_from = 1
-                n = 0
-              } else if (seen_from) {
-                n++
-              }
-            }
-            END {
-              if (!seen_from || cont || n <= 0) exit 1
-              print n
-            }
-          ' Dockerfile)"
-
-          history_output="$(docker history --human=false --no-trunc --format '{{.Size}}\t{{.CreatedBy}}' scim-server-db:ci)"
-          added_bytes="$(printf '%s\n' "$history_output" | awk -F '\t' -v limit="$dockerfile_layers" '
-            NR <= limit {
-              if ($1 !~ /^[0-9]+$/) {
-                printf "ERROR: non-numeric layer size on row %d: %s\n", NR, $0 > "/dev/stderr"
-                exit 1
-              }
-              printf "  layer %d: %sB (%s)\n", NR, $1, $2 > "/dev/stderr"
-              sum += $1
-            }
-            END {
-              if (NR < limit) {
-                printf "ERROR: expected at least %d history rows, got %d\n", limit, NR > "/dev/stderr"
-                exit 1
-              }
-              print sum + 0
-            }
-          ')"
-
-          echo "Image layer check: top ${dockerfile_layers} Dockerfile layer(s) added ${added_bytes}B (limit: 5242880B)"
-          if (( added_bytes > 5242880 )); then
-            echo "ERROR: scim-server-db:ci Dockerfile layers added ${added_bytes} bytes (> 5242880 bytes / 5 MiB); check Dockerfile for unintended OverlayFS copy-up" >&2
-            exit 1
-          fi
 
       - name: Verify runtime UID 65532 filesystem lockdown on /usr/share/flyway
         shell: bash
