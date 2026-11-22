@@ -1,7 +1,20 @@
 version: 2
+
+registries:
+  # Docker Hardened Images (dhi.io) requires Docker Hub token authentication
+  # on its OCI /v2/<repo>/tags/list endpoint. Ensure DOCKERHUB_TOKEN is exposed
+  # under organization or repository Dependabot secrets.
+  dhi:
+    type: docker-registry
+    url: https://dhi.io
+    username: edipal
+    password: ${{ secrets.DOCKERHUB_TOKEN }}
+
 updates:
   - package-ecosystem: "docker"
     directory: "/"
+    registries:
+      - dhi
     schedule:
       interval: "weekly"
       day: "monday"
